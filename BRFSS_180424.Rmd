@@ -1,0 +1,448 @@
+---
+title: "BRFFS_010424"
+author: "WB"
+date: "2024-04-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(haven)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(forcats)
+library(nnet)
+library(NHANES)
+library(MASS)
+library(naniar)
+library(Hmisc)
+library(mice)
+library(ggeffects)
+library(stringr)
+library(kableExtra)
+library(survey)
+library(purrr)
+rm(list = ls())
+setwd("/Users/will/Documents/Analysis/BRFSS/Data")
+## can obtain all these data files from: https://www.cdc.gov/brfss/annual_data/2022/llcp_multiq.html
+## depsite the naming convention, there are actually four datasets you'll need to download: 2022 BRFSS Questionnaire data (Combined Landline Telephone and Cellular Telephone); and then the three others named version 1, version 2 and version 3.  
+
+df_raw1 <- read_xpt("LLCP2022.XPT ")
+df_raw2 <- read_xpt("LLCP22V1.XPT")
+df_raw3 <- read_xpt("LLCP22V2.XPT")
+df_raw4 <- read_xpt("LLCP22V3.XPT")
+```
+
+## Cleaning
+``` {weights for social determinants, echo=FALSE}
+# weights for social determinants modules
+## Extract data from LLCP2022 for states that used the common version of the module
+llcp <- df_raw1[df_raw1$`_STATE` %in%
+                     c(1,2,4,6,9,10,11,12,13,16,18,19,20,21,23,25,27,28,29,30,32,33,34,35,37,44,45,47,48,49,50,53,54,55,56,72,78), ]
+## Rename weight variable LLCPWT to FINALWT for the main data se
+llcp$finalwt <- llcp$`_LLCPWT`
+
+## Extract data for states used version 1 of the module, and adjust weight since they used both v1 & v2 of the module
+llcpv1mdmi <- df_raw2[df_raw2$`_STATE` %in% c(24,26), ]
+llcpv1mdmi$finalwt <- llcpv1mdmi$`_LCPWTV1`* (0.50)
+
+## Extract data for states used only version 1 of the module and rename the LCPWTV1 to FINALWT
+llcpv1neoh <- df_raw2[df_raw2$`_STATE` %in% c(31,39), ]
+llcpv1neoh$finalwt <- llcpv1neoh$`_LCPWTV1`
+
+##V1 - combine V1datasets
+llcpv1<- rbind(llcpv1mdmi, llcpv1neoh)
+
+## V2 - Extract data for states used version 2 of the module, adjust weight since they used both v1 & v2 of the module
+llcpv2mdmi <- df_raw3[df_raw3$`_STATE` %in% c(24,26), ]
+llcpv2mdmi$finalwt <- llcpv2mdmi$`_LCPWTV2`* (0.50)
+
+# V2 – Extract data for state used v2 only and rename LCPWTV2 to FINALWT
+llcpv2ok<- df_raw3[df_raw3$`_STATE` %in% c(40), ]
+llcpv2ok$finalwt <- llcpv2ok$`_LCPWTV2`
+# V2 – Combine V2 datasets
+llcpv2<- rbind(llcpv2mdmi, llcpv2ok)
+
+## Combine all data sets for analysis
+list <- list(colnames(llcp), colnames(llcpv1), colnames(llcpv2))
+common_cols <- reduce(list, intersect)
+df <- rbind(
+  subset(llcp, select = common_cols), 
+  subset(llcpv1, select = common_cols),
+  subset(llcpv2, select = common_cols)
+)
+
+options(survey.lonely.psu = "adjust")
+
+## create survey design
+brfssdsgn <- svydesign(
+    id=~1,
+    strata = df$`_STRWT`,
+    weights = df$`finalwt`,
+    data = df)
+
+df <- df %>% 
+  rename(sex = SEXVAR,
+         deaf = DEAF,
+         blind = BLIND,
+         cognition = DECIDE,
+         mobility = DIFFWALK,
+         selfcare = DIFFDRES,
+         independence = DIFFALON)
+
+df$anydis <- ifelse(blind == 1 | deaf == 1 | mobility == 1 | cognition == 1 | independence == 1 | selfcare == 1, 1, 0)
+
+df$anydis <- factor(df$anydis,
+                 levels = c(1,2),
+                 labels = c("no", "yes"))
+```
+
+``` {weights for reaction to race, echo=FALSE}
+# Adapting weighting procedure from page 9: https://www.cdc.gov/brfss/annual_data/2022/pdf/Complex-Sampling-Weights-and-Preparing-Module-Data-for-Analysis-2022-508.pdf
+
+# Begin with the main data set LLCP2022 for 25 states that used the common version of the Reaction To Race module
+llcp2 <- df_raw1[df_raw1$`_STATE` %in% c(6,11,13,17,18,20,21,22,23,24,27,30,32,35,37,38,39,44,45,47,50,51,54,55,56), ]
+llcp2$finalwt <- llcp2$`_LLCPWT`
+# Extract V1 data for NE & NY
+nellcpv1<- df_raw2 %>% 
+    dplyr::filter(`_STATE`==c(31) | `_STATE`==c(36))
+nyllcpv1<- df_raw2 %>% 
+    dplyr::filter()
+# Rename LCPWTV1 to FINALWT for NE
+nellcpv1$finalwt <- nellcpv1$`_LLCPWT2`
+# Adjust weight for NY version 1 data set
+nyllcpv1$finalwt <- nyllcpv1$`_LLCPWT2` * (.50)
+# Combine NE & NY version 1 data set
+rrv1<- rbind(nellcpv1, nyllcpv1)
+
+# Extract V2 data for MI, NY
+minyllcpv2<- df_raw3 %>% 
+  dplyr::filter(`_STATE` %in% c(26,36))
+# Adjust final weight variable for version 2 data sets MI & NY
+minyllcpv2$finalwt <- minyllcpv2$`_LLCPWT2` * (.50)
+#Extract V2 data for OK
+okllcpv2 <- df_raw3 %>% 
+  dplyr::filter(`_STATE` %in% c(40))
+# Rename LCPWTV2 to FINALWT for OK
+okllcpv2$finalwt <- okllcpv2$`_LLCPWT2`
+# Combine V2 data sets
+rrv2 <- rbind(minyllcpv2, okllcpv2)
+
+# Extract V3 data & adjust weight for MI
+rrv3 <- df_raw4 %>% 
+  dplyr::filter(`_STATE` %in% c(26))
+rrv3$finalwt <- rrv3$`_LLCPWT2` * (.50)
+
+# Combine all data sets and it’s ready for analysis
+list <- list(colnames(llcp2), colnames(rrv1), colnames(rrv2), colnames(rrv3))
+common_cols <- reduce(list, intersect)
+df2 <- rbind(
+  subset(llcp2, select = common_cols), 
+  subset(rrv1, select = common_cols),
+  subset(rrv2, select = common_cols),
+  subset(rrv3, select = common_cols)
+)
+
+options(survey.lonely.psu = "adjust")
+```
+
+```{r cleaning2 and factorising, echo=FALSE}
+#i wanna change some variable names for ease
+df2 <- df2 %>% 
+  dplyr::rename(sex = SEXVAR,
+         deaf = DEAF,
+         blind = BLIND,
+         cognition = DECIDE,
+         mobility = DIFFWALK,
+         selfcare = DIFFDRES,
+         independence = DIFFALON)
+
+# i want to create a variable that is just a 'yes or no' for if someone reported a disability or not i.e., if someone reported one or more disabilities
+df2$anydis <- ifelse(df2$blind == 1 | df2$deaf == 1 | df2$mobility == 1 | df2$cognition == 1 | df2$independence == 1 | df2$selfcare == 1, 1, 0)
+
+df2$anydis <- factor(df2$anydis,
+                 levels = c(0,1),
+                 labels = c("no", "yes"))
+
+df2$`_IMPRACE` <- factor(df2$`_IMPRACE`,
+                         levels=c(1,2,3,4,5,6),
+                         labels=c("white","black","asian","americanIndian","Hispanic","Other"))
+
+df2$`_AGE_G` <- factor(df2$`_AGE_G`,
+                         levels=c(1,2,3,4,5,6),
+                         labels=c("18-24","25-34","35-44","45-54","55-64","65andup"))
+
+df2$`_SEX` <- factor(df2$`_SEX`,
+                         levels=c(1,2),
+                         labels=c("male","female"))
+
+df2$OBESE <- factor(df2$`_RFBMI5`,
+                         levels=c(1,2,9),
+                         labels=c("no","yes","unsure/refused"))
+df2$`_INCOMG1` <- factor(df2$`_INCOMG1`, 
+                      levels = c(1,2,3,4,5,6,7,9),
+                      labels = c("<15", "15-25", "25-35", "35-50", "50-100", "100-200", ">200", "unsure"))
+
+df2$RRTREAT <- factor(df2$RRTREAT, 
+                      levels = c(1,2,3,4,5,7,9),
+                      labels = c("worse", "same", "better", "mixed", "encountersameonly", "unsure", "refuse"))
+df2$RRTREAT <- fct_collapse(as.factor(df2$RRTREAT), "sameorbetter" = c("better","same"))
+
+df2$RRHCARE4 <- factor(df2$RRHCARE4, 
+                      levels = c(1,2,3,4,5,7,9),
+                      labels = c("worse", "same", "better", "mixed", "encountersameonly", "unsure", "refuse"))
+df2$RRHCARE4 <- fct_collapse(as.factor(df2$RRHCARE4), "sameorbetter" = c("better","same"))
+df2$RRPHYSM2 <- factor(df2$RRPHYSM2, 
+                       levels = c(1,2,7,9),
+                       labels = c("yes", "no", "unsure", "refused"))
+
+## create survey design (this has to be last thing you do because you store the dataframe we're using within this survey design object)
+brfssdsgn2 <- svydesign(
+    id=~1,
+    strata = df2$`_STRWT`,
+    weights = df2$`finalwt`,
+    data = df2)
+```
+
+```{r missingness checks, echo=FALSE}
+#checks for missingness within our data. you can do this with the "naniar" package that provides some nice ways to summarise missingness and do some cool visual checks to see where your missingness is in relation to other variables. for me, usually this is overkill as i am mostly interested in variables that don't have exceptional missingness usually (eg., age, sex/gender) but disability is something I want to be considerate of. 
+
+## so i'll start with just looking at disability. we can either do it the ol' fashioned way with base R: 
+missing_disability<-is.na(df2$anydis)
+prop.table(table(missing_disability))
+## or we can use naniar for the same result, and simplifies things a bit:
+prop_miss(df2$anydis)
+
+## what naniar doesn't do (or at least I don't know how to do it in naniar) is compare missingness of one variables by another to see if we can test our missing at random vs missing NOT at random. this is obviously the most important part (which most people ignore unfortunately). let's look at our sex variable to see if missingness is consistent between levels i.e., male vs female
+prop.table(table(df2$`_SEX`, missing_disability), margin=1)
+## looks the same to me! let's look at missingenss across age groups:
+prop.table(table(df2$`_AGE_G`, missing_disability), margin=1)
+## this is a very interesting example as it APPEARS that missingness is consistent up until the last two age groups where it drops by a percentage point then two. i don't think this is substantial quantitatively but theoretically, it does introduce some age-dependent bias into our data. i could make the argument that this is missing NOT at random, which is a bummer but i don't think excessive.
+
+## another very important exposure we're interested in its missingness is race category, which (very kindly) comes imputed with the dataset. 
+prop.table(table(df2$`_IMPRACE`, missing_disability), margin=1)
+## here we see an even stronger difference across missingness for the disability variable, and here we must admit there there is an underlying bias in our data when it comes to missing responses questions about disability across race categories. again, i don't believe this is an issue per se but we need to be mindful of this when interpreting. i'd suggest we  run a complete cases anlaysis and then run analyses with our imputed dataset to see how significant the differences are (from my experience, it often takes quite a lot of difference - more than the ~1-5% observed here). 
+
+```
+
+```{r proportion tables and tables, echo=FALSE}
+# here i am presenting tabulated data: weighted proportion tables followed by UNweighted raw numbers table. the svytable function can produce weighted number tables if you need. NOTE: the weighted percentages presented within the 2022Codebook will be different to below as they are calculated from the single LLCP2022 file. Below are based on the combined datasets from different "reactions to race" modules. 
+
+## disability status by imputed race
+prop.table(svytable(~`_IMPRACE`+anydis, design = brfssdsgn2), margin=1)*100
+table(df2$`_IMPRACE`, df2$anydis)
+
+## disability status by imputed age in six groups (don't have access to age as a continuous var D:)
+prop.table(svytable(~`_AGE_G`+anydis, design = brfssdsgn2), margin=1)*100
+table(df2$`_AGE_G`, df2$anydis)
+
+## disability status by imputed age in six groups (don't have access to age as a continuous var D:)
+prop.table(svytable(~`_SEX`+anydis, design = brfssdsgn2), margin=1)*100
+table(df2$`_SEX`, df2$anydis)
+
+## disability status by OBESEITY (using the survey computed from BMI)
+prop.table(svytable(~OBESE+anydis, design = brfssdsgn2), margin=1)*100
+table(df2$`OBESE`, df2$anydis)
+
+## disability status by income
+prop.table(svytable(~`_INCOMG1`+anydis, design = brfssdsgn2), margin=1)*100
+table(df2$`_INCOMG1`, df2$anydis)
+
+# The following 3 items are what I would focus on as primary outcome measures. 
+
+## discrimination in healthcare, generally and physical symptoms due to discrimination by race (not crosstabbed against disability) ###sorry, i changed up how i code the tables just for fun - output is the same just a different way of coding it. prefer it this way i think.
+
+svytable(~`_IMPRACE`+RRHCARE4, design = brfssdsgn2) %>% 
+    prop.table(margin=1)*100
+
+svytable(~`_IMPRACE`+RRTREAT, design = brfssdsgn2) %>% 
+    prop.table(margin=1)*100
+
+svytable(~`_IMPRACE`+RRPHYSM2, design = brfssdsgn2) %>% 
+    prop.table(margin=1)*100
+
+## I haven't worked out a good way to produce three way contigency tables to differentiate between those reporting disability and those not reporting disability so have to do it manually for now. not super familiar with the survey package and it seems to have limited flexibility with prop.tables
+
+### create new dataframes so we can create a new survey design variable that contains either those with disabilities or those without.
+df3 <- df2 %>% 
+    filter(anydis=="no")
+brfssdsgn3 <- svydesign(
+    id=~1,
+    strata = df3$`_STRWT`,
+    weights = df3$`finalwt`,
+    data = df3)
+###proptable followed by numbers table of race discrimination in healthcare for those without disabilities
+svytable(~`_IMPRACE`+RRHCARE4, design = brfssdsgn3) %>% 
+    prop.table(margin=1)*100
+table(df3$`_IMPRACE`, df3$RRHCARE4)
+
+df4 <- df2 %>% 
+    filter(anydis=="yes")
+brfssdsgn4 <- svydesign(
+    id=~1,
+    strata = df4$`_STRWT`,
+    weights = df4$`finalwt`,
+    data = df4)
+###proptable followed by numbers table of race discrimination in healthcare for those with disabilities
+svytable(~`_IMPRACE`+RRHCARE4, design = brfssdsgn4) %>% 
+    prop.table(margin=1)*100
+table(df4$`_IMPRACE`, df4$RRHCARE4)
+
+###proptable followed by numbers table of race discrimination in general for those without disabilities
+svytable(~`_IMPRACE`+RRTREAT, design = brfssdsgn3) %>% 
+    prop.table(margin=1)*100
+table(df3$`_IMPRACE`, df3$RRTREAT)
+
+###proptable followed by numbers table of race discrimination in general for those with disabilities
+svytable(~`_IMPRACE`+RRTREAT, design = brfssdsgn4) %>% 
+    prop.table(margin=1)*100
+table(df4$`_IMPRACE`, df4$RRTREAT)
+
+###proptable followed by numbers table of physical symptoms because of treatment due to your race for those without disabilities
+svytable(~`_IMPRACE`+RRPHYSM2, design = brfssdsgn3) %>% 
+    prop.table(margin=1)*100
+table(df3$`_IMPRACE`, df3$RRPHYSM2)
+
+###proptable followed by numbers table of physical symptoms because of treatment due to your race for those with disabilities
+svytable(~`_IMPRACE`+RRPHYSM2, design = brfssdsgn4) %>% 
+    prop.table(margin=1)*100
+table(df4$`_IMPRACE`, df4$RRPHYSM2)
+
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+### an homage to Laura who helped me
+colnames(llcp)[!colnames(llcp) %in% colnames(llcpv1)]
+colnames(llcp)[!colnames(llcp) %in% colnames(llcpv2)]
+colnames(llcpv1)[!colnames(llcpv1) %in% colnames(llcpv2)]
+
+```{code graveyard}
+# create a variable to be able define disability only status e.g., blind ONLY, deaf ONLY, mobility ONLY etc. i prefer this to just using the composite disability variables that include people who report 'blind' and combinations of other disabilities. can always create other variables with the different permutations of disability combinations e.g., blind/vision impaired & deaf/HoH.
+df_disability <- df2 %>%
+  dplyr::select(deaf, blind, cognition, mobility, selfcare, independence)
+df_disability$disabilitycom <- 0
+
+## create value in combined variable for deaf
+for (i in 1:length(df_disability$deaf)) {
+    if (!is.na(df_disability$deaf[i]) && df_disability$deaf[i] == 1 && all(c(
+        !is.na(df_disability$blind[i]),
+        !is.na(df_disability$cognition[i]),
+        !is.na(df_disability$mobility[i]),
+        !is.na(df_disability$selfcare[i]),
+        !is.na(df_disability$independence[i])
+    )) && all(c(
+        df_disability$blind[i] == 2,
+        df_disability$cognition[i] == 2,
+        df_disability$mobility[i] == 2,
+        df_disability$selfcare[i] == 2,
+        df_disability$independence[i] == 2
+    ))) {
+        df_disability$disabilitycom[i] <- 1
+    }
+}
+
+
+## create value in combined variable for blind
+for (i in 1:length(df_disability$blind)) {
+    if (!is.na(df_disability$blind[i]) && df_disability$blind[i] == 1 && all(c(
+        !is.na(df_disability$deaf[i]),
+        !is.na(df_disability$cognition[i]),
+        !is.na(df_disability$mobility[i]),
+        !is.na(df_disability$selfcare[i]),
+        !is.na(df_disability$independence[i])
+    )) && all(c(
+        df_disability$deaf[i] == 2,
+        df_disability$cognition[i] == 2,
+        df_disability$mobility[i] == 2,
+        df_disability$selfcare[i] == 2,
+        df_disability$independence[i] == 2
+    ))) {
+        df_disability$disabilitycom[i] <- 2
+    }
+}
+
+for (i in 1:length(df_disability$cognition)) {
+    if (!is.na(df_disability$cognition[i]) && df_disability$cognition[i] == 1 && all(c(
+        !is.na(df_disability$deaf[i]),
+        !is.na(df_disability$blind[i]),
+        !is.na(df_disability$mobility[i]),
+        !is.na(df_disability$selfcare[i]),
+        !is.na(df_disability$independence[i])
+    )) && all(c(
+        df_disability$deaf[i] == 2,
+        df_disability$blind[i] == 2,
+        df_disability$mobility[i] == 2,
+        df_disability$selfcare[i] == 2,
+        df_disability$independence[i] == 2
+    ))) {
+        df_disability$disabilitycom[i] <- 3
+    }
+}
+
+for (i in 1:length(df_disability$mobility)) {
+    if (!is.na(df_disability$mobility[i]) && df_disability$mobility[i] == 1 && all(c(
+        !is.na(df_disability$deaf[i]),
+        !is.na(df_disability$blind[i]),
+        !is.na(df_disability$cognition[i]),
+        !is.na(df_disability$selfcare[i]),
+        !is.na(df_disability$independence[i])
+    )) && all(c(
+        df_disability$deaf[i] == 2,
+        df_disability$blind[i] == 2,
+        df_disability$cognition[i] == 2,
+        df_disability$selfcare[i] == 2,
+        df_disability$independence[i] == 2
+    ))) {
+        df_disability$disabilitycom[i] <- 4
+    }
+}
+
+for (i in 1:length(df_disability$selfcare)) {
+    if (!is.na(df_disability$selfcare[i]) && df_disability$selfcare[i] == 1 && all(c(
+        !is.na(df_disability$deaf[i]),
+        !is.na(df_disability$blind[i]),
+        !is.na(df_disability$cognition[i]),
+        !is.na(df_disability$mobility[i]),
+        !is.na(df_disability$independence[i])
+    )) && all(c(
+        df_disability$deaf[i] == 2,
+        df_disability$blind[i] == 2,
+        df_disability$cognition[i] == 2,
+        df_disability$mobility[i] == 2,
+        df_disability$independence[i] == 2
+    ))) {
+        df_disability$disabilitycom[i] <- 5
+    }
+}
+
+for (i in 1:length(df_disability$independence)) {
+    if (!is.na(df_disability$independence[i]) && df_disability$independence[i] == 1 && all(c(
+        !is.na(df_disability$deaf[i]),
+        !is.na(df_disability$blind[i]),
+        !is.na(df_disability$cognition[i]),
+        !is.na(df_disability$mobility[i]),
+        !is.na(df_disability$selfcare[i])
+    )) && all(c(
+        df_disability$deaf[i] == 2,
+        df_disability$blind[i] == 2,
+        df_disability$cognition[i] == 2,
+        df_disability$mobility[i] == 2,
+        df_disability$selfcare[i] == 2
+    ))) {
+        df_disability$disabilitycom[i] <- 6
+    }
+}
+
+
+counts <- rowSums(df_disability[, c("deaf", "blind", "cognition", "mobility", "selfcare", "independence")] == 1)
+df_disability$disabilitycom <- ifelse(counts > 1, 7, df_disability$disabilitycom)
+
+df_disability$disabilitycom <- factor(df_disability$disabilitycom,
+                        levels=c(0,1,2,3,4,5,6,7),
+                        labels = c("None", "deaf", "blind", "cognition", "mobility", "selfcare", "independence", ">1disability")) 
+
+df2$disabilitycom <- df_disability$disabilitycom   
+```
+
+```

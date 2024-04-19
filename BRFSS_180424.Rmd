@@ -26,7 +26,7 @@ library(purrr)
 rm(list = ls())
 setwd("/Users/will/Documents/Analysis/BRFSS/Data")
 ## can obtain all these data files from: https://www.cdc.gov/brfss/annual_data/2022/llcp_multiq.html
-## depsite the naming convention, there are actually four datasets you'll need to download: 2022 BRFSS Questionnaire data (Combined Landline Telephone and Cellular Telephone); and then the three others named version 1, version 2 and version 3.  
+## depsite the naming convention, there are actually four datasets you'll need to download: 2022 BRFSS Questionnaire data (Combined Landline Telephone and Cellular Telephone); and then the three others named version 1, version 2 and version 3. These files are too large for me so upload within github so will have to be sourced from the website above. 
 
 df_raw1 <- read_xpt("LLCP2022.XPT ")
 df_raw2 <- read_xpt("LLCP22V1.XPT")
